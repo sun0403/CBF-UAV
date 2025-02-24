@@ -20,21 +20,28 @@ def generate_target_path(start_pos, end_pos, steps=100):
     
     return np.linspace(start_pos, end_pos, steps)
 
-def add_obstacle_on_path(client_id, path_points,place_at_ratio=0.4):
-    
+def add_obstacles_on_path(client_id, path_points, num_obstacles=3):
     p.setAdditionalSearchPath(pybullet_data.getDataPath())
-
     
-    obstacle_idx = int(len(path_points) * place_at_ratio)
-    obstacle_position = path_points[obstacle_idx].copy()
+    obstacle_ids = []
+    obstacle_positions = []
     
-    
-    obstacle_position[2] += 0.05 
+    # 计算均匀分布的障碍物索引
+    obstacle_indices = np.linspace(0, len(path_points) - 1, num_obstacles, dtype=int)
 
-    print(f"[INFO] Adding obstacle at {obstacle_position}")
+    for idx in obstacle_indices:
+        obstacle_position = path_points[idx].copy()
+        obstacle_position[2] += 0.1
+        
+        print(f"[INFO] Adding obstacle at {obstacle_position}")
+        
+        obstacle_id = p.loadURDF("sphere_small.urdf", obstacle_position, useFixedBase=True, physicsClientId=client_id)
+        
+        obstacle_ids.append(obstacle_id)
+        obstacle_positions.append(obstacle_position)
 
-    obstacle_id = p.loadURDF("sphere_small.urdf", obstacle_position, useFixedBase=True, physicsClientId=client_id)
-    return obstacle_id, obstacle_position
+    return obstacle_ids, obstacle_positions
+
 
 def run_simulation():
     
@@ -61,11 +68,11 @@ def run_simulation():
     
     target_positions = generate_target_path(np.array([0, 0, 0.5]), np.array([1, 1, 1.5]), steps=DURATION_SEC * CONTROL_FREQ_HZ)
     client_id = env.getPyBulletClient()
-    obstacle_id, obstacle_position = add_obstacle_on_path(client_id, target_positions,place_at_ratio=0.4)
+    obstacle_ids, obstacle_positions = add_obstacles_on_path(client_id, target_positions, num_obstacles=3)
 
-    controller =  NloptControl (drone_model=DroneModel.CF2X)
-    controller.obstacle_position = obstacle_position
-    controller.obstacle_radius = 0.2
+    controller =  NloptControl (drone_model=DroneModel.CF2X,obstacle_positions=obstacle_positions)
+    controller.obstacle_position = obstacle_positions
+    controller.obstacle_radius = 0.05
 
    
     drone_positions = []
@@ -131,13 +138,13 @@ def run_simulation():
     
     if PLOT_RESULTS:
         logger.plot()
-        plot_trajectory(drone_positions, obstacle_position)
+        plot_trajectory(drone_positions, obstacle_positions)
 
 # =======================
 # 绘制轨迹
 # =======================
-def plot_trajectory(drone_positions, obstacle_position):
-    """绘制无人机轨迹"""
+def plot_trajectory(drone_positions, obstacle_positions):
+    """绘制无人机轨迹和多个障碍物"""
     drone_positions = np.array(drone_positions)
 
     fig = plt.figure()
@@ -145,17 +152,19 @@ def plot_trajectory(drone_positions, obstacle_position):
     
     # 绘制无人机轨迹
     ax.plot(drone_positions[:, 0], drone_positions[:, 1], drone_positions[:, 2], label='Drone Path', color='blue')
-    ax.scatter(obstacle_position[0], obstacle_position[1], obstacle_position[2], label="Obstacle", color='red', s=100)
 
+    # 绘制多个障碍物
+    for obs_pos in obstacle_positions:
+        ax.scatter(obs_pos[0], obs_pos[1], obs_pos[2], label="Obstacle", color='red', s=100)
 
-    # 标注
     ax.set_xlabel("X Position (m)")
     ax.set_ylabel("Y Position (m)")
     ax.set_zlabel("Z Position (m)")
-    ax.set_title("Drone Trajectory with PID Control")
+    ax.set_title("Drone Trajectory with Multiple Obstacles")
     ax.legend()
     
     plt.show()
+
 
 # =======================
 # 运行主函数

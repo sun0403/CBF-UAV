@@ -16,7 +16,9 @@ class NloptControl(BaseControl):
 
     def __init__(self,
                  drone_model: DroneModel,
-                 g: float=9.8
+                 g: float=9.8,
+                 obstacle_positions=None,
+                 obstacle_radius = 0.2
                  ):
         super().__init__(drone_model=drone_model, g=g)
         if self.DRONE_MODEL != DroneModel.CF2X and self.DRONE_MODEL != DroneModel.CF2P:
@@ -33,11 +35,12 @@ class NloptControl(BaseControl):
         self.PWM2RPM_CONST = 4070.3
         self.MIN_PWM = 20000
         self.MAX_PWM = 65535
-        self.obstacle_position = np.array([0, 0, 0])  
+        self.obstacle_positions = obstacle_positions
+
         self.obstacle_radius = 0.2  
 
         self.alpha = 100000.0
-        self.safe_distance = 0.15
+        self.safe_distance = 0.05
         self.lambda1 = 10.0 # HOCBF 一级导数增益
         self.lambda2 = 10.0
         
@@ -213,8 +216,8 @@ class NloptControl(BaseControl):
     def _optimize_control(self, u_nominal, cur_pos, cur_vel, cur_quat):
         opt = nlopt.opt(nlopt.LD_SLSQP, 3)  
         opt.set_min_objective(lambda u, grad: self._objective(u, u_nominal, grad))
-        opt.set_lower_bounds([-0.5, -0.5, -0.5])  # 限制推力范围
-        opt.set_upper_bounds([0.5, 0.5, 0.5])
+        opt.set_lower_bounds([-10.0, -10.0, -10.0])  # 限制推力范围
+        opt.set_upper_bounds([10.0, 10.0, 10.0])
         opt.add_inequality_constraint(lambda u, grad: self._cbf_constraint(u, cur_pos, cur_vel, cur_quat, grad), 1e-6)
         opt.set_maxeval(50000)
         opt.set_xtol_rel(1e-4)
@@ -231,32 +234,40 @@ class NloptControl(BaseControl):
 
     
     def _cbf_constraint(self, u, cur_pos, cur_vel, cur_quat, grad):
-    
-        obstacle_distance = np.linalg.norm(cur_pos - self.obstacle_position)  
-    
+        cbf_values = []
+        grad_matrix = np.zeros((len(self.obstacle_positions), len(u)))
 
+        for i, obstacle_pos in enumerate(self.obstacle_positions):
 
-        h_value = obstacle_distance - self.safe_distance  
-
+            obstacle_distance = np.linalg.norm(cur_pos - obstacle_pos)  
         
-        direction_vector = (cur_pos - self.obstacle_position) / obstacle_distance  
+            h_value = obstacle_distance - self.safe_distance  
 
-        
-        h_dot = np.dot(direction_vector, cur_vel)  
+            
+            direction_vector = (cur_pos-obstacle_pos) / (obstacle_distance + 1e-6)
 
-        acceleration = (u / self.GRAVITY) - np.array([0, 0, 9.8]) 
-        h_ddot = np.dot(direction_vector, acceleration)
-        cbf_value = -(h_ddot + self.lambda1 * h_dot + self.lambda2**2 * h_value)
+            
+            h_dot = np.dot(direction_vector, cur_vel)  
 
-        
+            acceleration = (u / self.GRAVITY) - np.array([0, 0, 9.8]) 
+            h_ddot = np.dot(direction_vector, acceleration)
+            cbf_value = -(h_ddot + self.lambda1 * h_dot + self.lambda2**2 * h_value)
+            cbf_values.append(cbf_value)
+            grad_matrix[i, :] = -direction_vector / self.GRAVITY
+            
+        max_cbf_index = np.argmax(cbf_values)
+        max_cbf_value = cbf_values[max_cbf_index] 
+        max_cbf_grad = grad_matrix[max_cbf_index,:]
+        print(f"grad matrix={grad_matrix},max_cbf_index={max_cbf_index},max_cbf_value{max_cbf_value}")
         if grad.size > 0:
-            grad[:] = -direction_vector / self.GRAVITY
+                grad[:] = max_cbf_grad 
 
-        print(f"[CBF] h(x)={h_value:.4f}, h_dot={h_dot:.4f}, Constraint={cbf_value:.4f}")
 
-        return cbf_value  
+            
+
+        return max_cbf_value
     
 
    
 
-    
+     
