@@ -972,7 +972,7 @@ class BaseAviary(gym.Env):
         #            physicsClientId=self.CLIENT
         #            )
         p.loadURDF("sphere2.urdf",
-                   [0, 2, 0.5],
+                   [0, 4, 2.0],
                    p.getQuaternionFromEuler([0,0,0]),
                    physicsClientId=self.CLIENT
                    )

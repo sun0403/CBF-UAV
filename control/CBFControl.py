@@ -39,10 +39,10 @@ class NloptControl(BaseControl):
 
         self.obstacle_radius = 0.2  
 
-        self.alpha = 100000.0
-        self.safe_distance = 0.05
-        self.lambda1 = 10.0 # HOCBF 一级导数增益
-        self.lambda2 = 10.0
+        
+        self.safe_distance = 0.1
+        self.lambda1 = 1000.0 # HOCBF 一级导数增益
+        self.lambda2 = 100.0
         
         if self.DRONE_MODEL == DroneModel.CF2X:
             self.MIXER_MATRIX = np.array([ 
@@ -126,11 +126,6 @@ class NloptControl(BaseControl):
         self.integral_pos_e = self.integral_pos_e + pos_e*control_timestep
         self.integral_pos_e = np.clip(self.integral_pos_e, -2., 2.)
         self.integral_pos_e[2] = np.clip(self.integral_pos_e[2], -0.15, .15)
-        print("\n[DEBUG] Nominal Acceleration Components:")
-        print(f"  Position Error Component: {pos_e}")
-        print(f"  Integral Error Component: {self.integral_pos_e}")
-        print(f"  Velocity Error Component: {vel_e}")
-        print(f"  Gravity Component: {np.array([0, 0, self.GRAVITY])}")
 
 
         #### PID target thrust #####################################
@@ -216,20 +211,20 @@ class NloptControl(BaseControl):
     def _optimize_control(self, u_nominal, cur_pos, cur_vel, cur_quat):
         opt = nlopt.opt(nlopt.LD_SLSQP, 3)  
         opt.set_min_objective(lambda u, grad: self._objective(u, u_nominal, grad))
-        opt.set_lower_bounds([-10.0, -10.0, -10.0])  # 限制推力范围
-        opt.set_upper_bounds([10.0, 10.0, 10.0])
+        opt.set_lower_bounds([-50.0, -50.0, -50.0])  
+        opt.set_upper_bounds([50.0, 50.0, 50.0])
         opt.add_inequality_constraint(lambda u, grad: self._cbf_constraint(u, cur_pos, cur_vel, cur_quat, grad), 1e-6)
-        opt.set_maxeval(50000)
+        opt.set_maxeval(100)
         opt.set_xtol_rel(1e-4)
 
 
-        u_opt = opt.optimize(u_nominal)  # 以名义推力为起点优化
+        u_opt = opt.optimize(u_nominal)  
         return u_opt
     def _objective(self, u, u_nominal, grad):
         
        
         if grad.size > 0:
-            grad[:] = 2 * (u - u_nominal)  # 手动计算梯度
+            grad[:] = 2 * (u - u_nominal)  
         return np.linalg.norm(u - u_nominal) ** 2
 
     
@@ -258,7 +253,7 @@ class NloptControl(BaseControl):
         max_cbf_index = np.argmax(cbf_values)
         max_cbf_value = cbf_values[max_cbf_index] 
         max_cbf_grad = grad_matrix[max_cbf_index,:]
-        print(f"grad matrix={grad_matrix},max_cbf_index={max_cbf_index},max_cbf_value{max_cbf_value}")
+        print(f"grad matrix={grad_matrix},max_cbf_index={max_cbf_index},cbf_value{cbf_values},max_cbf_value{max_cbf_value}")
         if grad.size > 0:
                 grad[:] = max_cbf_grad 
 

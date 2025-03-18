@@ -9,6 +9,9 @@ from gym_pybullet_drones.control.DSLPIDControl import DSLPIDControl
 from gym_pybullet_drones.utils.Logger import Logger  
 from gym_pybullet_drones.control.CBFControl import NloptControl
 from gym_pybullet_drones.control.CTBRControl import CTBRControl
+import os
+os.environ["PYBULLET_EGL"] = "1"
+
 SIMULATION_FREQ_HZ = 240
 CONTROL_FREQ_HZ = 48
 DURATION_SEC = 10
@@ -19,22 +22,53 @@ DEFAULT_NUM_DRONES = 1
 def generate_target_path(start_pos, end_pos, steps=100):
     
     return np.linspace(start_pos, end_pos, steps)
-
-def add_obstacles_on_path(client_id, path_points, num_obstacles=3):
-    p.setAdditionalSearchPath(pybullet_data.getDataPath())
+def add_moving_obstacles(client_id, num_obstacles=30, x_range=(0.5, 1.0), y_range=(0.5, 1.0), z_range=(0.7, 1.5), velocity_range=(-0.3, 0.3)):
     
+    p.setAdditionalSearchPath(pybullet_data.getDataPath())
+
     obstacle_ids = []
     obstacle_positions = []
-    
-    # 计算均匀分布的障碍物索引
-    obstacle_indices = np.linspace(0, len(path_points) - 1, num_obstacles, dtype=int)
+    obstacle_velocities = []
 
-    for idx in obstacle_indices:
-        obstacle_position = path_points[idx].copy()
-        obstacle_position[2] += 0.1
+    for _ in range(num_obstacles):
+       
+        x = np.random.uniform(*x_range)
+        y = np.random.uniform(*y_range)
+        z = np.random.uniform(*z_range)
+
+        obstacle_position = np.array([x, y, z])
+
+        # **随机生成速度**
+        velocity = np.random.uniform(*velocity_range, size=3)
+
+        print(f"[INFO] Adding moving obstacle at {obstacle_position} with velocity {velocity}")
+
+        # **加载 URDF**
+        obstacle_id = p.loadURDF("sphere_small.urdf", obstacle_position, useFixedBase=False, physicsClientId=client_id)
+
+        # **存储数据**
+        obstacle_ids.append(obstacle_id)
+        obstacle_positions.append(obstacle_position)
+        obstacle_velocities.append(velocity)
+
+    return obstacle_ids, obstacle_positions, obstacle_velocities, x_range, y_range, z_range
+
+def add_obstacles_on_path(client_id, num_obstacles=20,x_range=(0.5, 1.0), y_range=(0.5, 1.0), z_range=(0.7, 1.5)):
+    p.setAdditionalSearchPath(pybullet_data.getDataPath())
+
+    obstacle_ids = []
+    obstacle_positions = []
+
+    for _ in range(num_obstacles):
+        
+        x = np.random.uniform(x_range[0], x_range[1])
+        y = np.random.uniform(y_range[0], y_range[1])
+        z = np.random.uniform(z_range[0], z_range[1])
+
+        obstacle_position = np.array([x, y, z])
         
         print(f"[INFO] Adding obstacle at {obstacle_position}")
-        
+
         obstacle_id = p.loadURDF("sphere_small.urdf", obstacle_position, useFixedBase=True, physicsClientId=client_id)
         
         obstacle_ids.append(obstacle_id)
@@ -68,7 +102,7 @@ def run_simulation():
     
     target_positions = generate_target_path(np.array([0, 0, 0.5]), np.array([1, 1, 1.5]), steps=DURATION_SEC * CONTROL_FREQ_HZ)
     client_id = env.getPyBulletClient()
-    obstacle_ids, obstacle_positions = add_obstacles_on_path(client_id, target_positions, num_obstacles=3)
+    obstacle_ids, obstacle_positions, obstacle_velocities, x_range, y_range, z_range = add_moving_obstacles(client_id, num_obstacles=15)
 
     controller =  NloptControl (drone_model=DroneModel.CF2X,obstacle_positions=obstacle_positions)
     controller.obstacle_position = obstacle_positions
@@ -81,6 +115,7 @@ def run_simulation():
     # 仿真开始
     action = np.zeros((DEFAULT_NUM_DRONES, 4))  
     start_time = time.time()
+    video_id = p.startStateLogging(p.STATE_LOGGING_VIDEO_MP4, "simulation_video.mp4")
 
     for step in range(DURATION_SEC * CONTROL_FREQ_HZ):
         
@@ -97,7 +132,22 @@ def run_simulation():
         
         target_pos = target_positions[step]
 
-        
+        for i, obs_id in enumerate(obstacle_ids):
+            new_position = obstacle_positions[i] + obstacle_velocities[i] * env.CTRL_TIMESTEP
+
+            # **检查边界，并反转速度**
+            if new_position[0] < x_range[0] or new_position[0] > x_range[1]:  
+                obstacle_velocities[i][0] *= -1  # 反转 X 轴速度
+            if new_position[1] < y_range[0] or new_position[1] > y_range[1]:  
+                obstacle_velocities[i][1] *= -1  # 反转 Y 轴速度
+            if new_position[2] < z_range[0] or new_position[2] > z_range[1]:  
+                obstacle_velocities[i][2] *= -1  # 反转 Z 轴速度
+
+            # **确保位置不会超出边界**
+            new_position = np.clip(new_position, [x_range[0], y_range[0], z_range[0]], [x_range[1], y_range[1], z_range[1]])
+            obstacle_positions[i] = new_position
+            p.resetBasePositionAndOrientation(obs_id, new_position, [0, 0, 0, 1])
+        controller.obstacle_positions = obstacle_positions
         action[0, :] = controller.computeControl(
             control_timestep=env.CTRL_TIMESTEP,
             cur_pos=cur_pos,
@@ -124,7 +174,7 @@ def run_simulation():
 
        
         time.sleep(env.CTRL_TIMESTEP)
-
+    p.stopStateLogging(video_id)
     # 关闭仿真环境
     env.close()
 
@@ -144,18 +194,22 @@ def run_simulation():
 # 绘制轨迹
 # =======================
 def plot_trajectory(drone_positions, obstacle_positions):
-    """绘制无人机轨迹和多个障碍物"""
+
     drone_positions = np.array(drone_positions)
 
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
     
-    # 绘制无人机轨迹
+    
     ax.plot(drone_positions[:, 0], drone_positions[:, 1], drone_positions[:, 2], label='Drone Path', color='blue')
 
-    # 绘制多个障碍物
+    first_label_added = False
     for obs_pos in obstacle_positions:
-        ax.scatter(obs_pos[0], obs_pos[1], obs_pos[2], label="Obstacle", color='red', s=100)
+        if not first_label_added:
+            ax.scatter(obs_pos[0], obs_pos[1], obs_pos[2], label="Obstacle", color='red', s=100)
+            first_label_added = True
+        else:
+            ax.scatter(obs_pos[0], obs_pos[1], obs_pos[2], color='red', s=100)
 
     ax.set_xlabel("X Position (m)")
     ax.set_ylabel("Y Position (m)")
