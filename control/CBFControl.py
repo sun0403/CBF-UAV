@@ -5,7 +5,6 @@ import nlopt
 from scipy.spatial.transform import Rotation
 from transforms3d.quaternions import rotate_vector, qconjugate, mat2quat, qmult
 from transforms3d.utils import normalized_vector
-import cvxpy as cp
 
 from gym_pybullet_drones.control.BaseControl import BaseControl
 from gym_pybullet_drones.utils.enums import DroneModel
@@ -40,7 +39,7 @@ class NloptControl(BaseControl):
         self.obstacle_radius = 0.2  
 
         
-        self.safe_distance = 0.1
+        self.safe_distance = 0.10
         self.lambda1 = 1000.0 # HOCBF 一级导数增益
         self.lambda2 = 100.0
         
@@ -102,6 +101,7 @@ class NloptControl(BaseControl):
         rpm = self._dslPIDAttitudeControl(control_timestep,
                                           thrust,
                                           cur_quat,
+                                          cur_ang_vel,
                                           computed_target_rpy,
                                           target_rpy_rates
                                           )
@@ -157,12 +157,15 @@ class NloptControl(BaseControl):
                                control_timestep,
                                thrust,
                                cur_quat,
+                               cur_ang_vel,
                                target_euler,
                                target_rpy_rates
                                ):
         cur_rotation = np.array(p.getMatrixFromQuaternion(cur_quat)).reshape(3, 3)
         cur_rpy = np.array(p.getEulerFromQuaternion(cur_quat))
-        target_quat = (Rotation.from_euler('XYZ', target_euler, degrees=False)).as_quat()
+        print(f"目标欧拉{target_euler},当前角速度{cur_ang_vel},当前欧拉{cur_rpy}")
+        target_euler_cbf = self._optimize_control_attitude(target_euler, cur_ang_vel, cur_rpy)
+        target_quat = (Rotation.from_euler('XYZ', target_euler_cbf, degrees=False)).as_quat()
         w,x,y,z = target_quat
         target_rotation = (Rotation.from_quat([w, x, y, z])).as_matrix()
         rot_matrix_e = np.dot((target_rotation.transpose()),cur_rotation) - np.dot(cur_rotation.transpose(),target_rotation)
@@ -211,10 +214,10 @@ class NloptControl(BaseControl):
     def _optimize_control(self, u_nominal, cur_pos, cur_vel, cur_quat):
         opt = nlopt.opt(nlopt.LD_SLSQP, 3)  
         opt.set_min_objective(lambda u, grad: self._objective(u, u_nominal, grad))
-        opt.set_lower_bounds([-50.0, -50.0, -50.0])  
-        opt.set_upper_bounds([50.0, 50.0, 50.0])
+        opt.set_lower_bounds([-30.0, -30.0, -30.0])  
+        opt.set_upper_bounds([30.0, 30, 30.0])
         opt.add_inequality_constraint(lambda u, grad: self._cbf_constraint(u, cur_pos, cur_vel, cur_quat, grad), 1e-6)
-        opt.set_maxeval(100)
+        opt.set_maxeval(50)
         opt.set_xtol_rel(1e-4)
 
 
@@ -245,23 +248,82 @@ class NloptControl(BaseControl):
             h_dot = np.dot(direction_vector, cur_vel)  
 
             acceleration = (u / self.GRAVITY) - np.array([0, 0, 9.8]) 
+
             h_ddot = np.dot(direction_vector, acceleration)
+
             cbf_value = -(h_ddot + self.lambda1 * h_dot + self.lambda2**2 * h_value)
+
             cbf_values.append(cbf_value)
+
             grad_matrix[i, :] = -direction_vector / self.GRAVITY
             
         max_cbf_index = np.argmax(cbf_values)
         max_cbf_value = cbf_values[max_cbf_index] 
         max_cbf_grad = grad_matrix[max_cbf_index,:]
-        print(f"grad matrix={grad_matrix},max_cbf_index={max_cbf_index},cbf_value{cbf_values},max_cbf_value{max_cbf_value}")
         if grad.size > 0:
                 grad[:] = max_cbf_grad 
 
-
-            
-
         return max_cbf_value
     
+    def _euler_cbf_constraint_single_deg(self, u_deg, ang_vel_deg, rpy_deg, grad, idx):
+        max_angle = 15.0  # 最大角度，单位度
+        lambda_att = 10000.0
+
+        phi = u_deg[idx]  # u_deg 是优化变量
+        phi_dot = ang_vel_deg[idx]  
+        h = max_angle**2 - phi**2
+        h_dot = -2 * phi * phi_dot
+        cbf = -(h_dot + lambda_att * h)
+
+        if grad.size > 0:
+            
+            grad[:] = np.zeros_like(u_deg)  # 确保其他维度是0
+            grad[idx] = 2.0 * phi_dot + lambda_att * 2.0 * phi
+
+        return cbf
+    def _optimize_control_attitude(self, target_euler, cur_ang_vel, cur_rpy):
+        target_deg = np.degrees(target_euler)
+        cur_rpy_deg = np.degrees(cur_rpy)
+        cur_ang_vel_deg = np.degrees(cur_ang_vel)
+        print(f"[DEBUG] Start NLOPT attitude optimization for target_euler (deg): {target_deg}")
+
+
+        def cbf_wrapper(u_deg, grad):
+            u_rad = np.radians(u_deg)
+            return self._objective(u_rad, target_euler, grad)
+        
+        opt = nlopt.opt(nlopt.LD_SLSQP, 3)  
+        opt.set_min_objective(cbf_wrapper)
+        opt.set_lower_bounds([-180.0, -180.0, -180.0])
+        opt.set_upper_bounds([180.0, 180.0, 180.0])
+        for i in range(3):
+            opt.add_inequality_constraint(lambda u_deg, grad, i=i: self._euler_cbf_constraint_single_deg(u_deg, cur_ang_vel_deg, cur_rpy_deg, grad, i), 1e-6)
+        opt.set_xtol_rel(1e-6)
+        opt.set_maxeval(100)
+
+
+        
+        try:
+            u_opt_deg = opt.optimize(np.degrees(target_euler))
+        except Exception as e:
+            print(f"[⚠️ WARNING] NLOPT exception: {e}")
+            print(f"[⚠️ DEBUG] Final CBF values before failure (deg): cur_rpy={cur_rpy_deg}, ang_vel={cur_ang_vel_deg}, target={target_deg}")
+            u_opt_deg = target_deg
+        return np.radians(u_opt_deg)
+    
+    def _objective(self, u, u_nominal, grad):
+        weights = np.array([1.0, 1.0, 1.0])  
+
+        diff = u - u_nominal
+        obj = np.sum(weights * diff**2)
+
+        if grad.size > 0:
+            grad[:] = 2.0 * weights * diff
+
+        return obj
+
+
+        
 
    
 

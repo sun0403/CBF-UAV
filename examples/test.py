@@ -115,7 +115,7 @@ def run_simulation():
     # 仿真开始
     action = np.zeros((DEFAULT_NUM_DRONES, 4))  
     start_time = time.time()
-    video_id = p.startStateLogging(p.STATE_LOGGING_VIDEO_MP4, "simulation_video.mp4")
+    
 
     for step in range(DURATION_SEC * CONTROL_FREQ_HZ):
         
@@ -124,7 +124,7 @@ def run_simulation():
         cur_quat = obs[0][3:7] 
         cur_vel = obs[0][10:13]
         cur_ang_vel = obs[0][13:16] 
-
+        print(f"角速度是{cur_ang_vel}")
         if np.linalg.norm(cur_quat) < 1e-6:
             print("[WARNING] cur_quat is invalid, setting to [1, 0, 0, 0]")
             cur_quat = np.array([1, 0, 0, 0])
@@ -174,7 +174,7 @@ def run_simulation():
 
        
         time.sleep(env.CTRL_TIMESTEP)
-    p.stopStateLogging(video_id)
+    
     # 关闭仿真环境
     env.close()
 
