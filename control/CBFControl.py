@@ -8,7 +8,8 @@ from transforms3d.utils import normalized_vector
 
 from gym_pybullet_drones.control.BaseControl import BaseControl
 from gym_pybullet_drones.utils.enums import DroneModel
-
+from GaussianProcess import GaussianProcessCBF
+import torch
 class NloptControl(BaseControl):
     
     
@@ -24,6 +25,7 @@ class NloptControl(BaseControl):
             print("[ERROR] in DSLPIDControl.__init__(), DSLPIDControl requires DroneModel.CF2X or DroneModel.CF2P")
             exit()
         
+
         self.P_COEFF_FOR = np.array([.4, .4, 1.25])
         self.I_COEFF_FOR = np.array([.05, .05, .05])
         self.D_COEFF_FOR = np.array([.2, .2, .5])
@@ -35,14 +37,16 @@ class NloptControl(BaseControl):
         self.MIN_PWM = 20000
         self.MAX_PWM = 65535
         self.obstacle_positions = obstacle_positions
+        self.gp_model = GaussianProcessCBF(input_dim=6, max_points=100)
 
-        self.obstacle_radius = 0.2  
+        self.obstacle_radius = 0.2
+        
 
-        
-        self.safe_distance = 0.10
-        self.lambda1 = 1000.0 # HOCBF 一级导数增益
-        self.lambda2 = 100.0
-        
+
+        self.safe_distance = 0.2
+        self.lambda1 = 1.0
+        self.lambda2 = 1.0
+        self._initialize_gp_samples()
         if self.DRONE_MODEL == DroneModel.CF2X:
             self.MIXER_MATRIX = np.array([ 
                                     [-.5, -.5, -1],
@@ -214,14 +218,19 @@ class NloptControl(BaseControl):
     def _optimize_control(self, u_nominal, cur_pos, cur_vel, cur_quat):
         opt = nlopt.opt(nlopt.LD_SLSQP, 3)  
         opt.set_min_objective(lambda u, grad: self._objective(u, u_nominal, grad))
-        opt.set_lower_bounds([-30.0, -30.0, -30.0])  
-        opt.set_upper_bounds([30.0, 30, 30.0])
+        opt.set_lower_bounds([-50.0, -50.0, -50.0])  
+        opt.set_upper_bounds([50.0, 50, 50.0])
         opt.add_inequality_constraint(lambda u, grad: self._cbf_constraint(u, cur_pos, cur_vel, cur_quat, grad), 1e-6)
-        opt.set_maxeval(50)
+        opt.set_maxeval(100)
         opt.set_xtol_rel(1e-4)
 
 
         u_opt = opt.optimize(u_nominal)  
+        self.gp_model.update(cur_pos, cur_vel, u_opt,self.obstacle_positions,self.GRAVITY,
+                                              safe_distance=self.safe_distance,
+                                              lambda1=self.lambda1,
+                                              lambda2=self.lambda2)
+
         return u_opt
     def _objective(self, u, u_nominal, grad):
         
@@ -230,44 +239,86 @@ class NloptControl(BaseControl):
             grad[:] = 2 * (u - u_nominal)  
         return np.linalg.norm(u - u_nominal) ** 2
 
-    
+    def _initialize_gp_samples(self, num_samples=10, pos_center=np.array([0, 0, 0.5]), vel_range=0.5):
+        """
+        Sample initial GP training data near the obstacle for safe set initialization.
+        """
+        print("[INFO] Initializing GP dataset with random samples...")
+        for i in range(num_samples):
+            pos_noise = np.random.uniform(-0.1, 0.1, size=3)  
+            vel_noise = np.random.uniform(-vel_range, vel_range, size=3)
+            x_sample = np.concatenate([pos_center + pos_noise, vel_noise])  
+            
+            if self.obstacle_positions is not None and len(self.obstacle_positions) > 0:
+                obs = self.obstacle_positions[0]
+                direction = (pos_center + pos_noise - obs)
+                distance = np.linalg.norm(direction) + 1e-6
+                direction /= distance
+            else:
+                direction = np.array([1.0, 0.0, 0.0]) 
+
+            acc = np.zeros(3)
+            h = distance - self.safe_distance
+            h_dot = np.dot(direction, vel_noise)
+            h_ddot = np.dot(direction, acc)
+            cbf_val = -(h_ddot + self.lambda1 * h_dot + self.lambda2**2 * h)
+
+            if hasattr(self.gp_model, 'add_sample'):
+                self.gp_model.add_sample(x_sample, cbf_val)
+
+        print(f"[INFO] GP initialization complete. Dataset size: {len(self.gp_model.X_train)}")
+
     def _cbf_constraint(self, u, cur_pos, cur_vel, cur_quat, grad):
+        print(f"u的大小和维度{u}")
         cbf_values = []
-        grad_matrix = np.zeros((len(self.obstacle_positions), len(u)))
+        
 
         for i, obstacle_pos in enumerate(self.obstacle_positions):
 
             obstacle_distance = np.linalg.norm(cur_pos - obstacle_pos)  
         
-            h_value = obstacle_distance - self.safe_distance  
+        
+
+        
+            gp_input = np.concatenate([cur_pos, cur_vel])
+            
+            sigma2 = self.gp_model.predict_variance(gp_input)
+            
+            sigma2_grad = self.gp_model.compute_variance_gradient(gp_input)
+            
+            print(f"sigma{sigma2}§§§§§§§§§§§§§§§§§§§§§§§§§{sigma2_grad}")
+            h_value = obstacle_distance - self.safe_distance - sigma2
 
             
             direction_vector = (cur_pos-obstacle_pos) / (obstacle_distance + 1e-6)
 
             
             h_dot = np.dot(direction_vector, cur_vel)  
+            sigma2_dot = np.dot(sigma2_grad[0, :3], cur_vel)
+
+            h_dot_s = h_dot - sigma2_dot
+            
 
             acceleration = (u / self.GRAVITY) - np.array([0, 0, 9.8]) 
 
             h_ddot = np.dot(direction_vector, acceleration)
+            sigma2_ddot = np.dot(sigma2_grad[0, 3:], acceleration)
 
-            cbf_value = -(h_ddot + self.lambda1 * h_dot + self.lambda2**2 * h_value)
-
+    
+            h_ddot_s = h_ddot - sigma2_ddot
+            cbf_value = -(h_ddot_s + self.lambda1 * h_dot_s + self.lambda2 * h_value)
             cbf_values.append(cbf_value)
 
-            grad_matrix[i, :] = -direction_vector / self.GRAVITY
             
         max_cbf_index = np.argmax(cbf_values)
-        max_cbf_value = cbf_values[max_cbf_index] 
-        max_cbf_grad = grad_matrix[max_cbf_index,:]
+        max_cbf_value = cbf_values[max_cbf_index]
         if grad.size > 0:
-                grad[:] = max_cbf_grad 
-
+            grad[:] = -direction_vector / self.GRAVITY  
         return max_cbf_value
     
     def _euler_cbf_constraint_single_deg(self, u_deg, ang_vel_deg, rpy_deg, grad, idx):
-        max_angle = 15.0  # 最大角度，单位度
-        lambda_att = 10000.0
+        max_angle = 30.0  # 最大角度，单位度
+        lambda_att = 10.0
 
         phi = u_deg[idx]  # u_deg 是优化变量
         phi_dot = ang_vel_deg[idx]  
@@ -306,7 +357,7 @@ class NloptControl(BaseControl):
         try:
             u_opt_deg = opt.optimize(np.degrees(target_euler))
         except Exception as e:
-            print(f"[⚠️ WARNING] NLOPT exception: {e}")
+            print(f"[WARNING] NLOPT exception: {e}")
             print(f"[⚠️ DEBUG] Final CBF values before failure (deg): cur_rpy={cur_rpy_deg}, ang_vel={cur_ang_vel_deg}, target={target_deg}")
             u_opt_deg = target_deg
         return np.radians(u_opt_deg)
@@ -321,6 +372,7 @@ class NloptControl(BaseControl):
             grad[:] = 2.0 * weights * diff
 
         return obj
+    
 
 
         
