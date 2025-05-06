@@ -10,7 +10,25 @@ from gym_pybullet_drones.utils.Logger import Logger
 from gym_pybullet_drones.control.CBFControl import NloptControl
 from gym_pybullet_drones.control.CTBRControl import CTBRControl
 import os
+
+from mpl_toolkits.mplot3d import Axes3D
+import matplotlib.pyplot as plt
 os.environ["PYBULLET_EGL"] = "1"
+import sys
+class Log(object):
+    def __init__(self, filename="debug_log.txt"):
+        self.terminal = sys.stdout
+        self.log = open(filename, "w")
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+
+sys.stdout = Log()
 
 SIMULATION_FREQ_HZ = 240
 CONTROL_FREQ_HZ = 48
@@ -80,10 +98,53 @@ initial_xyzs = np.array([
     [0.5, 0.5, 1.0]
 ])
 
+def plot_gp_variance_3d(gp_model, x_range, y_range, z_range, num_points=20):
+
+
+    xs = np.linspace(*x_range, num_points)
+    ys = np.linspace(*y_range, num_points)
+    zs = np.linspace(*z_range, num_points)
+
+    X, Y, Z = np.meshgrid(xs, ys, zs)
+    variances = np.zeros_like(X)
+
+    for i in range(num_points):
+        for j in range(num_points):
+            for k in range(num_points):
+                pos = np.array([X[i, j, k], Y[i, j, k], Z[i, j, k]])
+                vel = np.zeros(3)  # 速度设为 0
+                input_x = np.concatenate([pos, vel])
+                sigma2 = gp_model.predict_variance(input_x)
+                variances[i, j, k] = sigma2
+
+    # 可视化
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+
+    # 阈值，避免太小的方差看不出来
+    threshold = np.percentile(variances.flatten(), 95)
+
+    ax.scatter(
+        X[variances > threshold],
+        Y[variances > threshold],
+        Z[variances > threshold],
+        c=variances[variances > threshold],
+        cmap='viridis',
+        marker='o'
+    )
+
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('Z')
+    plt.title('GP Predicted Variance (sigma²) Distribution')
+    plt.show()
+
+
+
 
 def run_simulation():
     
-
+    ground_truth_log = []
     
     env = CtrlAviary(
         drone_model=DroneModel.CF2X,
@@ -115,6 +176,7 @@ def run_simulation():
    
 
     controller =  NloptControl (drone_model=DroneModel.CF2X,obstacle_positions=obstacle_positions)
+    # controller = DSLPIDControl(drone_model=DroneModel.CF2X)
     controller.obstacle_radius = 0.2
 
    
@@ -129,6 +191,8 @@ def run_simulation():
     for step in range(DURATION_SEC * CONTROL_FREQ_HZ):
         
         obs, _, _, _, _ = env.step(action)
+        
+        
         cur_pos = obs[0][:3]   
         cur_quat = obs[0][3:7] 
         cur_vel = obs[0][10:13]
@@ -153,7 +217,14 @@ def run_simulation():
         )
         action[0, :] = output[0]
     
-    
+    #     ground_truth_log.append({
+    #     "time": step / CONTROL_FREQ_HZ,
+    #     "cur_pos": cur_pos.copy(),
+    #     "cur_vel": cur_vel.copy(),
+    #     "cur_quat": cur_quat.copy(),
+    #     "cur_ang_vel": cur_ang_vel.copy(),
+    #     "obstacles": obstacle_positions.copy()
+    # })
         for i in range(1, DEFAULT_NUM_DRONES):
             target_pos = initial_xyzs[i]
             action[i, :], _, _ = static_controllers[i - 1].computeControlFromState(
@@ -181,8 +252,13 @@ def run_simulation():
     
     # 关闭仿真环境
     env.close()
+    # import pickle
+    # with open("ground_truth_pid.pkl", "wb") as f:
+    #     pickle.dump(ground_truth_log, f)
+    # print("Ground truth 数据已保存为 ground_truth_pid.pkl")
 
-    
+    if hasattr(controller, "gp_model"):
+        controller.gp_model.save("gp_model_sigma.pt")
     if len(timestamps) > 0:
         logger.save()
         logger.save_as_csv("pid_nlopt")
@@ -194,6 +270,14 @@ def run_simulation():
         logger.plot()
         plot_trajectory(drone_positions, obstacle_positions)
 
+        plot_gp_variance_and_trajectory(
+            drone_positions,
+            obstacle_positions,
+            controller.gp_model,
+            x_range=(0.0, 2.0),
+            y_range=(0.0, 1.2),
+            z_range=(0.5, 2.0)
+        )
 # =======================
 # 绘制轨迹
 # =======================
@@ -221,6 +305,66 @@ def plot_trajectory(drone_positions, obstacle_positions):
     ax.set_title("Drone Trajectory with Multiple Obstacles")
     ax.legend()
     
+    plt.show()
+
+def plot_gp_variance_and_trajectory(drone_positions, obstacle_positions, gp_model, x_range, y_range, z_range, num_points=20):
+
+    xs = np.linspace(*x_range, num_points)
+    ys = np.linspace(*y_range, num_points)
+    zs = np.linspace(*z_range, num_points)
+
+    X, Y, Z = np.meshgrid(xs, ys, zs)
+    variances = np.zeros_like(X)
+
+    for i in range(num_points):
+        for j in range(num_points):
+            for k in range(num_points):
+                pos = np.array([X[i, j, k], Y[i, j, k], Z[i, j, k]])
+                vel = np.zeros(3)  # 假设速度为0
+                input_x = np.concatenate([pos, vel])
+                sigma2 = gp_model.predict_variance(input_x)
+                variances[i, j, k] = sigma2
+
+    # 画图
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+
+    # 方差散点
+    threshold = np.percentile(variances.flatten(), 95)  # 只画方差最大的 5%
+    ax.scatter(
+        X.flatten(),
+        Y.flatten(),
+        Z.flatten(),
+        c=variances.flatten(),
+        cmap='viridis',
+        marker='o',
+        s=15,
+        alpha=0.5,
+        label="Variance (sigma²)"
+    )
+
+    # 无人机飞行轨迹
+    drone_positions = np.array(drone_positions)
+    ax.plot(
+        drone_positions[:, 0],
+        drone_positions[:, 1],
+        drone_positions[:, 2],
+        color='blue',
+        label='Drone Path'
+    )
+
+    # 障碍物
+    for idx, obs_pos in enumerate(obstacle_positions):
+        if idx == 0:
+            ax.scatter(obs_pos[0], obs_pos[1], obs_pos[2], color='red', s=100, label='Obstacle')
+        else:
+            ax.scatter(obs_pos[0], obs_pos[1], obs_pos[2], color='red', s=100)
+
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('Z')
+    ax.set_title('Drone Path and GP Variance Distribution')
+    ax.legend()
     plt.show()
 
 
