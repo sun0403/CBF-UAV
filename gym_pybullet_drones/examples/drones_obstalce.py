@@ -257,8 +257,7 @@ def run_simulation():
     #     pickle.dump(ground_truth_log, f)
     # print("Ground truth 数据已保存为 ground_truth_pid.pkl")
 
-    if hasattr(controller, "gp_model"):
-        controller.gp_model.save("gp_model_sigma.pt")
+    
     if len(timestamps) > 0:
         logger.save()
         logger.save_as_csv("pid_nlopt")
@@ -277,6 +276,11 @@ def run_simulation():
             x_range=(0.0, 2.0),
             y_range=(0.0, 1.2),
             z_range=(0.5, 2.0)
+        )
+        visualize_gp_samples(
+    gp_model=controller.gp_model,
+    obstacle_positions=obstacle_positions,
+    drone_positions=drone_positions
         )
 # =======================
 # 绘制轨迹
@@ -367,6 +371,38 @@ def plot_gp_variance_and_trajectory(drone_positions, obstacle_positions, gp_mode
     ax.legend()
     plt.show()
 
+def visualize_gp_samples(gp_model, obstacle_positions=None, drone_positions=None):
+    if hasattr(gp_model, 'X_all') and len(gp_model.X_all) > 0:
+        pos = np.array(gp_model.X_all)
+    elif gp_model.X_train.size(0) > 0:
+        pos = gp_model.X_train.cpu().numpy()[:, :3]
+    else:
+        print("[GP] 当前无训练样本")
+        return
+
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+    
+    ax.scatter(pos[:, 0], pos[:, 1], pos[:, 2], c='b', s=20, label='GP Samples')
+
+    if obstacle_positions is not None:
+        for idx, obs_pos in enumerate(obstacle_positions):
+            if idx == 0:
+                ax.scatter(*obs_pos, c='r', s=80, label="Obstacle")
+            else:
+                ax.scatter(*obs_pos, c='r', s=80)
+
+    if drone_positions is not None:
+        drone_positions = np.array(drone_positions)
+        ax.plot(drone_positions[:, 0], drone_positions[:, 1], drone_positions[:, 2], color='g', label='Drone Path')
+
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.set_zlabel("Z")
+    ax.set_title("All GP Sample Positions (History)")
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
 
 # =======================
 # 运行主函数

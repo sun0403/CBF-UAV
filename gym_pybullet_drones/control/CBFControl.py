@@ -45,8 +45,8 @@ class NloptControl(BaseControl):
 
 
         self.safe_distance = 0.01
-        self.lambda1 = 20.0
-        self.lambda2 = 20.0
+        self.lambda1 =40.0
+        self.lambda2 = 10.0
         self._initialize_gp_samples()
         if self.DRONE_MODEL == DroneModel.CF2X:
             self.MIXER_MATRIX = np.array([ 
@@ -240,7 +240,7 @@ class NloptControl(BaseControl):
             grad[:] = 2 * (u - u_nominal)  
         return np.linalg.norm(u - u_nominal) ** 2
 
-    def _initialize_gp_samples(self, num_samples=10, pos_center=np.array([0, 0, 0.5]), vel_range=0.5):
+    def _initialize_gp_samples(self, num_samples=50, pos_center=np.array([0, 0, 0.5]), vel_range=0.5):
         """
         Sample initial GP training data near the obstacle for safe set initialization.
         """
