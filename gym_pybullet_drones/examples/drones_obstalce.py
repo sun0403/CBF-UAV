@@ -13,8 +13,13 @@ import os
 
 from mpl_toolkits.mplot3d import Axes3D
 import matplotlib.pyplot as plt
+import os
+import sys
+import matplotlib.animation as animation
 os.environ["PYBULLET_EGL"] = "1"
 import sys
+
+
 class Log(object):
     def __init__(self, filename="debug_log.txt"):
         self.terminal = sys.stdout
@@ -37,7 +42,7 @@ PLOT_RESULTS = True
 DEFAULT_NUM_DRONES = 2
 
 
-def generate_target_path(start_pos, end_pos, steps=100):
+def generate_target_path(start_pos, end_pos, steps=200):
     
     return np.linspace(start_pos, end_pos, steps)
 def add_moving_obstacles(client_id, num_obstacles=30, x_range=(0.5, 1.0), y_range=(0.5, 1.0), z_range=(0.7, 1.5), velocity_range=(-0.3, 0.3)):
@@ -98,47 +103,6 @@ initial_xyzs = np.array([
     [0.5, 0.5, 1.0]
 ])
 
-def plot_gp_variance_3d(gp_model, x_range, y_range, z_range, num_points=20):
-
-
-    xs = np.linspace(*x_range, num_points)
-    ys = np.linspace(*y_range, num_points)
-    zs = np.linspace(*z_range, num_points)
-
-    X, Y, Z = np.meshgrid(xs, ys, zs)
-    variances = np.zeros_like(X)
-
-    for i in range(num_points):
-        for j in range(num_points):
-            for k in range(num_points):
-                pos = np.array([X[i, j, k], Y[i, j, k], Z[i, j, k]])
-                vel = np.zeros(3)  # 速度设为 0
-                input_x = np.concatenate([pos, vel])
-                sigma2 = gp_model.predict_variance(input_x)
-                variances[i, j, k] = sigma2
-
-    # 可视化
-    fig = plt.figure()
-    ax = fig.add_subplot(111, projection='3d')
-
-    # 阈值，避免太小的方差看不出来
-    threshold = np.percentile(variances.flatten(), 95)
-
-    ax.scatter(
-        X[variances > threshold],
-        Y[variances > threshold],
-        Z[variances > threshold],
-        c=variances[variances > threshold],
-        cmap='viridis',
-        marker='o'
-    )
-
-    ax.set_xlabel('X')
-    ax.set_ylabel('Y')
-    ax.set_zlabel('Z')
-    plt.title('GP Predicted Variance (sigma²) Distribution')
-    plt.show()
-
 
 
 
@@ -177,11 +141,17 @@ def run_simulation():
 
     controller =  NloptControl (drone_model=DroneModel.CF2X,obstacle_positions=obstacle_positions)
     # controller = DSLPIDControl(drone_model=DroneModel.CF2X)
-    controller.obstacle_radius = 0.2
+    controller._initialize_gp_samples(path_points=target_positions)
 
+    controller.obstacle_radius = 0.2
+    
    
     drone_positions = []
     timestamps = []
+    sigma2_frames = []
+    sigma2_vertical_profiles = []
+    z_heights = np.linspace(0.3, 2.0, 50)
+    obstacle_center = obstacle_positions[0] 
 
     # 仿真开始
     action = np.zeros((DEFAULT_NUM_DRONES, 4))  
@@ -197,7 +167,7 @@ def run_simulation():
         cur_quat = obs[0][3:7] 
         cur_vel = obs[0][10:13]
         cur_ang_vel = obs[0][13:16] 
-        print(f"角速度是{cur_ang_vel}")
+        
         if np.linalg.norm(cur_quat) < 1e-6:
             print("[WARNING] cur_quat is invalid, setting to [1, 0, 0, 0]")
             cur_quat = np.array([1, 0, 0, 0])
@@ -217,14 +187,7 @@ def run_simulation():
         )
         action[0, :] = output[0]
     
-    #     ground_truth_log.append({
-    #     "time": step / CONTROL_FREQ_HZ,
-    #     "cur_pos": cur_pos.copy(),
-    #     "cur_vel": cur_vel.copy(),
-    #     "cur_quat": cur_quat.copy(),
-    #     "cur_ang_vel": cur_ang_vel.copy(),
-    #     "obstacles": obstacle_positions.copy()
-    # })
+    
         for i in range(1, DEFAULT_NUM_DRONES):
             target_pos = initial_xyzs[i]
             action[i, :], _, _ = static_controllers[i - 1].computeControlFromState(
@@ -246,8 +209,14 @@ def run_simulation():
 
         
         env.render()
-
-       
+        vertical_sigma2 = []
+        for z in z_heights:
+            pos = np.array([obstacle_center[0], obstacle_center[1], z])
+            x_input = np.concatenate([pos, np.zeros(3)])
+            sigma2 = controller.gp_model.predict_variance(x_input)
+            vertical_sigma2.append(sigma2)
+        sigma2_vertical_profiles.append(vertical_sigma2)
+        sigma2_frames.append(sigma2_vertical_profiles) 
         time.sleep(env.CTRL_TIMESTEP)
     
     # 关闭仿真环境
@@ -268,23 +237,24 @@ def run_simulation():
     if PLOT_RESULTS:
         logger.plot()
         plot_trajectory(drone_positions, obstacle_positions)
+        (x0, y0, z0), (x1, y1, z1) = auto_range(drone_positions)
+        
 
-        plot_gp_variance_and_trajectory(
-            drone_positions,
-            obstacle_positions,
-            controller.gp_model,
-            x_range=(0.0, 2.0),
-            y_range=(0.0, 1.2),
-            z_range=(0.5, 2.0)
-        )
         visualize_gp_samples(
     gp_model=controller.gp_model,
     obstacle_positions=obstacle_positions,
     drone_positions=drone_positions
         )
+        plot_sigma2_vertical_over_time(sigma2_vertical_profiles, z_heights)
 # =======================
 # 绘制轨迹
 # =======================
+
+def auto_range(drone_positions, margin=1.0):
+    drone_positions = np.array(drone_positions)
+    min_pos = np.min(drone_positions, axis=0) - margin
+    max_pos = np.max(drone_positions, axis=0) + margin
+    return tuple(min_pos), tuple(max_pos)
 def plot_trajectory(drone_positions, obstacle_positions):
 
     drone_positions = np.array(drone_positions)
@@ -311,65 +281,6 @@ def plot_trajectory(drone_positions, obstacle_positions):
     
     plt.show()
 
-def plot_gp_variance_and_trajectory(drone_positions, obstacle_positions, gp_model, x_range, y_range, z_range, num_points=20):
-
-    xs = np.linspace(*x_range, num_points)
-    ys = np.linspace(*y_range, num_points)
-    zs = np.linspace(*z_range, num_points)
-
-    X, Y, Z = np.meshgrid(xs, ys, zs)
-    variances = np.zeros_like(X)
-
-    for i in range(num_points):
-        for j in range(num_points):
-            for k in range(num_points):
-                pos = np.array([X[i, j, k], Y[i, j, k], Z[i, j, k]])
-                vel = np.zeros(3)  # 假设速度为0
-                input_x = np.concatenate([pos, vel])
-                sigma2 = gp_model.predict_variance(input_x)
-                variances[i, j, k] = sigma2
-
-    # 画图
-    fig = plt.figure()
-    ax = fig.add_subplot(111, projection='3d')
-
-    # 方差散点
-    threshold = np.percentile(variances.flatten(), 95)  # 只画方差最大的 5%
-    ax.scatter(
-        X.flatten(),
-        Y.flatten(),
-        Z.flatten(),
-        c=variances.flatten(),
-        cmap='viridis',
-        marker='o',
-        s=15,
-        alpha=0.5,
-        label="Variance (sigma²)"
-    )
-
-    # 无人机飞行轨迹
-    drone_positions = np.array(drone_positions)
-    ax.plot(
-        drone_positions[:, 0],
-        drone_positions[:, 1],
-        drone_positions[:, 2],
-        color='blue',
-        label='Drone Path'
-    )
-
-    # 障碍物
-    for idx, obs_pos in enumerate(obstacle_positions):
-        if idx == 0:
-            ax.scatter(obs_pos[0], obs_pos[1], obs_pos[2], color='red', s=100, label='Obstacle')
-        else:
-            ax.scatter(obs_pos[0], obs_pos[1], obs_pos[2], color='red', s=100)
-
-    ax.set_xlabel('X')
-    ax.set_ylabel('Y')
-    ax.set_zlabel('Z')
-    ax.set_title('Drone Path and GP Variance Distribution')
-    ax.legend()
-    plt.show()
 
 def visualize_gp_samples(gp_model, obstacle_positions=None, drone_positions=None):
     if hasattr(gp_model, 'X_all') and len(gp_model.X_all) > 0:
@@ -403,6 +314,32 @@ def visualize_gp_samples(gp_model, obstacle_positions=None, drone_positions=None
     ax.legend()
     plt.tight_layout()
     plt.show()
+
+def get_sigma2_vertical_curve(gp_model, center, z_range=(0.0, 2.0), num_points=100):
+    x0, y0, _ = center
+    zs = np.linspace(*z_range, num_points)
+    sigma2_vals = []
+    for z in zs:
+        pos = np.array([x0, y0, z])
+        vel = np.zeros(3)
+        x_input = np.concatenate([pos, vel])
+        sigma2_vals.append(gp_model.predict_variance(x_input))
+    return sigma2_vals
+
+def plot_sigma2_vertical_over_time(sigma2_profiles, z_heights):
+    sigma2_profiles = np.array(sigma2_profiles).T  # shape: [z, time]
+
+    plt.figure(figsize=(8, 6))
+    plt.imshow(sigma2_profiles, aspect='auto', cmap='viridis',
+               extent=[0, sigma2_profiles.shape[1], z_heights[0], z_heights[-1]],
+               origin='lower')
+    plt.colorbar(label='σ²(x)')
+    plt.xlabel("Time step")
+    plt.ylabel("Height (Z)")
+    plt.title("Vertical σ² Distribution Below Obstacle Over Time")
+    plt.tight_layout()
+    plt.show()
+
 
 # =======================
 # 运行主函数
